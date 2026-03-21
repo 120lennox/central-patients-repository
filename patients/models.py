@@ -27,5 +27,18 @@ class Patient(models.Model):
     account_claimed = models.BooleanField(default=False)
 
     # patient names fhir standard
+    first_name = models.CharField(max_length=100)
+    last_name = models.CharField(max_length=100)
+    full_name = models.CharField(max_length=200, db_index=True)
+
+    # demographics
+    gender = models.CharField(max_length=20, choices=GENDER_CHOICES, default='unknown')
+    date_of_birth = models.DateField(null=True, blank=True)
+    phone_number = models.CharField(max_length=20, null=True, blank=True)
+    email = models.EmailField(null=True, blank=True)
+    district_of_origin = models.CharField(max_length=100, null=True, blank=True)
+    traditional_authority = models.CharField(max_length=100, null=True, blank=True)
+    village = models.CharField(max_length=100, null=True, blank=True)
+    place_of_residence = models.CharField(max_length=200, null=True, blank=True)
     
 
