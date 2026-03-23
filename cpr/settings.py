@@ -44,6 +44,8 @@ INSTALLED_APPS = [
 
     # 3rd party apps
     'rest_framework',
+    'rest_framework_simplejwt',
+    'dj_rest_auth',
 ]
 
 REST_FRAMEWORK = {
