@@ -40,6 +40,7 @@ INSTALLED_APPS = [
     'django.contrib.sites',  
 
     # local apps
+    'accounts',
     'dhw',
     'patients',
 
@@ -69,6 +70,8 @@ SPECTACULAR_SETTINGS = {
     "DESCRIPTION": "API for managing patient records in the Central Patients Repository (CPR). Uses FHIR standard for patient data representation.",
     "VERSION": "1.0.0",
 }
+
+AUTH_USER_MODEL = 'accounts.User'
 
 ACCOUNT_AUTHENTICATION_METHOD = 'username_email'
 ACCOUNT_EMAIL_REQUIRED = False        # email is optional

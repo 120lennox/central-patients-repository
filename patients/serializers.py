@@ -56,7 +56,7 @@ class PatientSerializer(serializers.ModelSerializer):
             'identifier',
             'name',
             'gender',
-            'birthDate',
+            # 'birthDate',
             'telecom',
             'address',
             'contact',

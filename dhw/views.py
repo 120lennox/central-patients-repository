@@ -17,11 +17,6 @@ from .permissions import IsAdmin, IsClinician, IsPatientOwner
 
 User = get_user_model()
 
-
-# -----------------------------------------------------------------------------
-# Helpers
-# -----------------------------------------------------------------------------
-
 def issue_registration_token(patient):
     """
     Short-lived JWT (10 min) issued after OTP verification.
@@ -56,7 +51,6 @@ def get_full_auth_tokens(user):
         'access': str(refresh.access_token),
     }
 
-# -----------------------------------------------------------------------------
 # Patient ViewSet
 class PatientViewSet(viewsets.ModelViewSet):
     """
@@ -66,7 +60,7 @@ class PatientViewSet(viewsets.ModelViewSet):
     create:      POST /patients/
     retrieve:    GET  /patients/{id}/
     update:      PUT  /patients/{id}/
-    destroy:     DELETE /patients/{id}/  → soft delete only
+    destroy:     DELETE /patients/{id}/ 
     everything:  GET  /patients/{id}/$everything/
     summary:     GET  /patients/{id}/$summary/
     search:      GET  /patients/?identifier=
@@ -190,17 +184,9 @@ class PatientViewSet(viewsets.ModelViewSet):
 # -----------------------------------------------------------------------------
 
 class PatientAuthViewSet(viewsets.ViewSet):
-    """
-    Handles DHW patient activation flow.
-
-    verify_otp:              POST /auth/verify-otp/
-    complete_registration:   POST /auth/complete-registration/
-    """
     permission_classes = [AllowAny]
-
     # STEP 1 — Patient submits OTP
     # POST /auth/verify-otp/
-    # -------------------------------------------------------------------------
     @action(detail=False, methods=['post'], url_path='verify-otp')
     def verify_otp(self, request):
         patient_id = request.data.get('patient_id')
@@ -235,7 +221,6 @@ class PatientAuthViewSet(viewsets.ViewSet):
 
     # STEP 2 — Patient sets email (optional) + password
     # POST /auth/complete-registration/
-    # -------------------------------------------------------------------------
     @action(detail=False, methods=['post'], url_path='complete-registration')
     def complete_registration(self, request):
         registration_token = request.data.get('registration_token')
