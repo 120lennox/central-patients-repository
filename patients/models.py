@@ -166,7 +166,7 @@ class PatientOTP(models.Model):
                 otp_code=otp_code
             )
             if otp.is_used:
-                return False, "OTP has already been used.", None
-            return True, "OTP is valid.", otp.patient
+                return False, "OTP has already been used.", None, None
+            return True, "OTP is valid.", otp.patient, otp
         except cls.DoesNotExist:
-            return False, "Invalid OTP.", None
+            return False, "Invalid OTP.", None, None
