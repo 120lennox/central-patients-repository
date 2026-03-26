@@ -9,6 +9,7 @@ from django.utils import timezone
 from datetime import timedelta
 import jwt
 
+from .permissions import IsAdmin, IsClinician, IsAdminOrClinician, IsPatientOrClinician, IsPatientOwner
 from django.conf import settings
 from patients.models import Patient, PatientOTP
 from patients.serializers import PatientSerializer
@@ -85,13 +86,15 @@ class PatientViewSet(viewsets.ModelViewSet):
 
     def get_permissions(self):
         if self.action == 'create':
-            return [IsAuthenticated(), IsClinician()]
+            return [IsAdminOrClinician()]
         if self.action == 'destroy':
-            return [IsAuthenticated(), IsAdmin()]
+            return [IsAdmin()]
         if self.action in ['update', 'partial_update']:
-            return [IsAuthenticated(), IsClinician()]
-        if self.action in ['list', 'retrieve', 'summary', 'everything']:
-            return [IsAuthenticated()]
+            return [IsAdminOrClinician()]
+        if self.action == 'list':
+            return [IsAdminOrClinician()]
+        if self.action in ['retrieve', 'summary', 'everything']:
+            return [IsPatientOrClinician()]
         return [IsAuthenticated()]
     
 
