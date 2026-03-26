@@ -11,7 +11,7 @@ class IsAdmin(BasePermission):
     def has_permission(self, request, view):
         return (
             request.user.is_authenticated and
-            request.user.role == 'admin'
+            request.user.is_admin
         )
 
 
@@ -25,7 +25,7 @@ class IsClinician(BasePermission):
     def has_permission(self, request, view):
         return (
             request.user.is_authenticated and
-            request.user.role == 'clinician'
+            request.user.is_clinician
         )
 
 
@@ -39,7 +39,7 @@ class IsAdminOrClinician(BasePermission):
     def has_permission(self, request, view):
         return (
             request.user.is_authenticated and
-            request.user.role in ['admin', 'clinician']
+            request.user.is_admin or request.user.is_clinician
         )
 
 
@@ -61,17 +61,13 @@ class IsPatientOwner(BasePermission):
 
 
 class IsPatientOrClinician(BasePermission):
-    """
-    Grants access to the patient themselves or a clinician/admin.
-    Used for retrieve — clinician can view any patient,
-    patient can only view themselves (enforced by get_queryset).
-    """
     message = "You do not have permission to access this record."
 
     def has_permission(self, request, view):
         if not request.user.is_authenticated:
             return False
         return (
-            request.user.role in ['admin', 'clinician'] or
-            hasattr(request.user, 'patient_profile')
+            request.user.is_admin or
+            request.user.is_clinician or
+            request.user.is_patient
         )
