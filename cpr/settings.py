@@ -61,6 +61,12 @@ REST_FRAMEWORK = {
     ],
 }
 
+ACCOUNT_AUTHENTICATION_METHOD = 'username_email'
+ACCOUNT_EMAIL_REQUIRED = False        # email is optional
+ACCOUNT_EMAIL_VERIFICATION = 'none'  # no email verification, OTP handles this
+ACCOUNT_USERNAME_REQUIRED = True      # username (patient_id) is always set
+ACCOUNT_USER_MODEL_USERNAME_FIELD = 'username'
+
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',

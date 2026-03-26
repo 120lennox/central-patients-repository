@@ -1,5 +1,6 @@
 from .models import Patient
 from rest_framework import serializers
+from .constants import FHIRSystems
 
 class PatientSerializer(serializers.ModelSerializer):
     # FHIR standard fields
@@ -238,7 +239,7 @@ class PatientSerializer(serializers.ModelSerializer):
         if instance.national_id:
             # national_id IS the patient_id in this case
             identifiers.append({
-                "system": Patient.national_id(),
+                "system": FHIRSystems.national_id(),
                 "type": {"text": "NI"},
                 "use": "official",
                 "value": instance.national_id
@@ -246,7 +247,7 @@ class PatientSerializer(serializers.ModelSerializer):
         else:
             # digital_id IS the patient_id in this case
             identifiers.append({
-                "system": Patient.digital_id(),
+                "system": FHIRSystems.digital_id(),
                 "type": {"text": "DIG"},
                 "use": "usual",
                 "value": instance.digital_id
