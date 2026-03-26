@@ -52,6 +52,7 @@ INSTALLED_APPS = [
     'allauth.account',
     'allauth.socialaccount',
     'dj_rest_auth.registration',
+    'drf_spectacular',
 ]
 
 REST_FRAMEWORK = {
@@ -59,6 +60,14 @@ REST_FRAMEWORK = {
         'rest_framework.authentication.SessionAuthentication',
         'rest_framework_simplejwt.authentication.JWTAuthentication',
     ],
+
+    'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
+}
+
+SPECTACULAR_SETTINGS = {
+    "TITLE": "Central Patients Repository API",
+    "DESCRIPTION": "API for managing patient records in the Central Patients Repository (CPR). Uses FHIR standard for patient data representation.",
+    "VERSION": "1.0.0",
 }
 
 ACCOUNT_AUTHENTICATION_METHOD = 'username_email'
