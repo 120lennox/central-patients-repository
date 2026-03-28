@@ -27,7 +27,12 @@ SECRET_KEY = 'django-insecure-upj&vj-gw^j**95ubo-^lzf3-n+jplx=2jc6b%rg@h(n#zg^w1
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = os.getenv(
+    'DJANGO_ALLOWED_HOSTS', 
+    'localhost,127.0.0.1'
+).split(',')
+if not DEBUG:
+    ALLOWED_HOSTS.append('.onrender.com')
 
 
 # Application definition
@@ -56,6 +61,7 @@ INSTALLED_APPS = [
     'allauth.socialaccount',
     'dj_rest_auth.registration',
     'drf_spectacular',
+    'corsheaders',
 ]
 
 REST_FRAMEWORK = {
