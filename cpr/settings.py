@@ -12,6 +12,8 @@ https://docs.djangoproject.com/en/6.0/ref/settings/
 
 from pathlib import Path
 
+import dj_database_url
+
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -117,13 +119,28 @@ WSGI_APPLICATION = 'cpr.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/6.0/ref/settings/#databases
 
-DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
-    }
-}
+import os
 
+DATABASE_URL = os.environ.get('DATABASE_URL')
+import dj_database_url
+
+if DATABASE_URL:
+    # Production — Neon PostgreSQL
+    DATABASES = {
+        'default': dj_database_url.parse(
+            DATABASE_URL,
+            conn_max_age=600,
+            conn_health_checks=True,
+        )
+    }
+else:
+    # Development — SQLite
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.sqlite3',
+            'NAME': BASE_DIR / 'db.sqlite3',
+        }
+    }
 
 # Password validation
 # https://docs.djangoproject.com/en/6.0/ref/settings/#auth-password-validators
@@ -153,7 +170,7 @@ TIME_ZONE = 'UTC'
 
 USE_I18N = True
 
-USE_TZ = True
+USE_TZ = True   
 
 
 # Static files (CSS, JavaScript, Images)
@@ -161,7 +178,6 @@ USE_TZ = True
 
 STATIC_URL = 'static/'
 
-import os
 FHIR_SYSTEM_BASE_URL = os.environ.get(
     'FHIR_SYSTEM_BASE_URL',
     'http://127.0.0.1:8000'  # default to dev
