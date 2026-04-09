@@ -1,5 +1,6 @@
 from .models import Patient
 from rest_framework import serializers
+from django.utils import timezone
 from .constants import FHIRSystems
 
 class PatientSerializer(serializers.ModelSerializer):
@@ -139,10 +140,15 @@ class PatientSerializer(serializers.ModelSerializer):
         # Extract address
         if address_data:
             addr = address_data[0]
-            validated_data['place_of_residence']   = addr.get('text')
-            validated_data['city']               = addr.get('line', [''])[0]
-            validated_data['traditional_authority'] = addr.get('village')
-            validated_data['district_of_origin']    = addr.get('district')
+            # FHIR 'text' → place_of_residence
+            validated_data['place_of_residence'] = addr.get('text')
+            # FHIR 'line' (first line) → village
+            validated_data['village'] = addr.get('line', [''])[0] if addr.get('line') else None
+            # FHIR 'district' → district_of_origin
+            validated_data['district_of_origin'] = addr.get('district')
+            # FHIR 'city' → traditional_authority (or ignore if not needed)
+            if 'city' in addr:
+                validated_data['traditional_authority'] = addr.get('city')
 
         # Extract emergency contact
         if contact_data:
@@ -436,8 +442,13 @@ class EncounterSerializer(serializers.ModelSerializer):
         # Organisation
         org_id, org_display = _parse_reference(service_prov_data)
 
+
         # Period
         visit_date = period_data.get('start') if period_data else None
+        # Convert visit_date to datetime if it's a string
+        from django.utils.dateparse import parse_datetime
+        if isinstance(visit_date, str):
+            visit_date = parse_datetime(visit_date)
 
         # Flat text fields
         symptoms  = '; '.join(r.get('text', '') for r in reason_data) or None
@@ -1191,3 +1202,749 @@ class MedicationRequestSerializer(serializers.ModelSerializer):
             "note": [{"text": instance.notes}] if instance.notes else [],
             "contained": MedicationDispenseSerializer(dispenses_qs, many=True).data,
         }
+
+
+def _extract_code_display_fhir(codeable_concept, field_name):
+    if not isinstance(codeable_concept, dict):
+        raise serializers.ValidationError({field_name: "Must be an object."})
+
+    coding = codeable_concept.get('coding') or []
+    if coding and isinstance(coding[0], dict):
+        code = coding[0].get('code')
+        display = coding[0].get('display') or codeable_concept.get('text')
+        if code and display:
+            return code, display
+
+    code = codeable_concept.get('code')
+    display = codeable_concept.get('display') or codeable_concept.get('text')
+    if code and display:
+        return code, display
+
+    raise serializers.ValidationError({
+        field_name: "coding[0].code and display/text are required."
+    })
+
+
+class VaccinationSerializer(serializers.ModelSerializer):
+    resourceType = serializers.CharField(required=False, write_only=True)
+    patient = serializers.DictField(write_only=True)
+    vaccineCode = serializers.DictField(write_only=True)
+    occurrenceDateTime = serializers.DateTimeField(write_only=True)
+    performer = serializers.ListField(
+        child=serializers.DictField(), required=False, write_only=True
+    )
+    lotNumber = serializers.CharField(
+        required=False, allow_blank=True, write_only=True
+    )
+    note = serializers.ListField(
+        child=serializers.DictField(), required=False, write_only=True
+    )
+
+    class Meta:
+        from .models import Vaccination
+        model = Vaccination
+        fields = [
+            'id', 'resourceType', 'status', 'patient', 'vaccineCode',
+            'occurrenceDateTime', 'performer', 'lotNumber', 'note',
+        ]
+        extra_kwargs = {'id': {'read_only': True}}
+
+    def validate(self, attrs):
+        resource_type = attrs.get('resourceType')
+        if resource_type and resource_type != 'Immunization':
+            raise serializers.ValidationError({'resourceType': 'Must be Immunization.'})
+        return attrs
+
+    def create(self, validated_data):
+        from .models import Patient, Vaccination
+
+        validated_data.pop('resourceType', None)
+        patient_ref = validated_data.pop('patient', {}).get('reference', '')
+        patient_id = patient_ref.split('/')[-1]
+        patient = Patient.objects.get(id=patient_id)
+
+        vaccine_code, vaccine_display = _extract_code_display_fhir(
+            validated_data.pop('vaccineCode'), 'vaccineCode'
+        )
+        performer_data = validated_data.pop('performer', [])
+        note_data = validated_data.pop('note', [])
+
+        performer_id = None
+        performer_display = None
+        if performer_data:
+            actor = performer_data[0].get('actor', {})
+            performer_id, performer_display = _parse_reference(actor)
+
+        return Vaccination.objects.create(
+            patient=patient,
+            status=validated_data.get('status', 'completed'),
+            vaccine_code=vaccine_code,
+            vaccine_display=vaccine_display,
+            occurrence_date=validated_data.get('occurrenceDateTime'),
+            performer_id=performer_id,
+            performer_display=performer_display,
+            lot_number=validated_data.get('lotNumber'),
+            note='; '.join(n.get('text', '') for n in note_data) or None,
+        )
+
+    def update(self, instance, validated_data):
+        validated_data.pop('resourceType', None)
+
+        if 'patient' in validated_data:
+            from .models import Patient
+            patient_ref = validated_data['patient'].get('reference', '')
+            patient_id = patient_ref.split('/')[-1]
+            instance.patient = Patient.objects.get(id=patient_id)
+
+        if 'status' in validated_data:
+            instance.status = validated_data['status']
+
+        if 'vaccineCode' in validated_data:
+            instance.vaccine_code, instance.vaccine_display = _extract_code_display_fhir(
+                validated_data['vaccineCode'], 'vaccineCode'
+            )
+
+        if 'occurrenceDateTime' in validated_data:
+            instance.occurrence_date = validated_data['occurrenceDateTime']
+
+        if 'performer' in validated_data:
+            performers = validated_data['performer']
+            if performers:
+                actor = performers[0].get('actor', {})
+                instance.performer_id, instance.performer_display = _parse_reference(actor)
+            else:
+                instance.performer_id = None
+                instance.performer_display = None
+
+        if 'lotNumber' in validated_data:
+            instance.lot_number = validated_data['lotNumber']
+
+        if 'note' in validated_data:
+            notes = validated_data['note']
+            instance.note = '; '.join(n.get('text', '') for n in notes) or None
+
+        instance.save()
+        return instance
+
+    def to_representation(self, instance):
+        payload = {
+            "resourceType": "Immunization",
+            "id": str(instance.id),
+            "status": instance.status,
+            "vaccineCode": {
+                "coding": [{
+                    "code": instance.vaccine_code,
+                    "display": instance.vaccine_display,
+                }],
+                "text": instance.vaccine_display,
+            },
+            "patient": {
+                "reference": f"Patient/{instance.patient.id}",
+                "display": instance.patient.full_name,
+            },
+            "occurrenceDateTime": instance.occurrence_date.isoformat() if instance.occurrence_date else None,
+        }
+
+        if instance.performer_id or instance.performer_display:
+            payload["performer"] = [{
+                "actor": {
+                    "reference": f"Practitioner/{instance.performer_id}" if instance.performer_id else None,
+                    "display": instance.performer_display,
+                }
+            }]
+
+        if instance.lot_number:
+            payload["lotNumber"] = instance.lot_number
+
+        if instance.note:
+            payload["note"] = [{"text": instance.note}]
+
+        return payload
+
+
+class DiagnosticTestSerializer(serializers.ModelSerializer):
+    resourceType = serializers.CharField(required=False, write_only=True)
+    code = serializers.DictField(write_only=True)
+    subject = serializers.DictField(write_only=True)
+    effectiveDateTime = serializers.DateTimeField(required=False, write_only=True)
+    issued = serializers.DateTimeField(
+        required=False, allow_null=True, write_only=True
+    )
+    conclusionCode = serializers.ListField(
+        child=serializers.DictField(), required=False, write_only=True
+    )
+    performer = serializers.ListField(
+        child=serializers.DictField(), required=False, write_only=True
+    )
+
+    class Meta:
+        from .models import DiagnosticTest
+        model = DiagnosticTest
+        fields = [
+            'id', 'resourceType', 'status', 'code', 'subject',
+            'effectiveDateTime', 'issued', 'performer',
+            'conclusion', 'conclusionCode',
+        ]
+        extra_kwargs = {'id': {'read_only': True}}
+
+    def validate(self, attrs):
+        resource_type = attrs.get('resourceType')
+        if resource_type and resource_type != 'DiagnosticReport':
+            raise serializers.ValidationError({'resourceType': 'Must be DiagnosticReport.'})
+        return attrs
+
+    def create(self, validated_data):
+        from .models import Patient, DiagnosticTest
+
+        validated_data.pop('resourceType', None)
+        subject_ref = validated_data.pop('subject', {}).get('reference', '')
+        patient_id = subject_ref.split('/')[-1]
+        patient = Patient.objects.get(id=patient_id)
+
+        code, display = _extract_code_display_fhir(validated_data.pop('code'), 'code')
+        conclusion_code = validated_data.pop('conclusionCode', [])
+        performer_data = validated_data.pop('performer', [])
+
+        performer_id = None
+        performer_display = None
+        if performer_data:
+            performer_id, performer_display = _parse_reference(performer_data[0])
+
+        return DiagnosticTest.objects.create(
+            patient=patient,
+            status=validated_data.get('status', 'final'),
+            test_code=code,
+            test_display=display,
+            effective_datetime=validated_data.get('effectiveDateTime') or timezone.now(),
+            issued_at=validated_data.get('issued'),
+            conclusion=validated_data.get('conclusion'),
+            result_value=(conclusion_code[0].get('text') if conclusion_code else None),
+            performer_id=performer_id,
+            performer_display=performer_display,
+        )
+
+    def update(self, instance, validated_data):
+        validated_data.pop('resourceType', None)
+
+        if 'subject' in validated_data:
+            from .models import Patient
+            subject_ref = validated_data['subject'].get('reference', '')
+            patient_id = subject_ref.split('/')[-1]
+            instance.patient = Patient.objects.get(id=patient_id)
+
+        if 'status' in validated_data:
+            instance.status = validated_data['status']
+
+        if 'code' in validated_data:
+            instance.test_code, instance.test_display = _extract_code_display_fhir(
+                validated_data['code'], 'code'
+            )
+
+        if 'effectiveDateTime' in validated_data:
+            instance.effective_datetime = validated_data['effectiveDateTime']
+
+        if 'issued' in validated_data:
+            instance.issued_at = validated_data['issued']
+
+        if 'conclusion' in validated_data:
+            instance.conclusion = validated_data['conclusion']
+
+        if 'conclusionCode' in validated_data:
+            conclusion_code = validated_data['conclusionCode']
+            instance.result_value = conclusion_code[0].get('text') if conclusion_code else None
+
+        if 'performer' in validated_data:
+            performer_data = validated_data['performer']
+            if performer_data:
+                instance.performer_id, instance.performer_display = _parse_reference(performer_data[0])
+            else:
+                instance.performer_id = None
+                instance.performer_display = None
+
+        instance.save()
+        return instance
+
+    def to_representation(self, instance):
+        payload = {
+            "resourceType": "DiagnosticReport",
+            "id": str(instance.id),
+            "status": instance.status,
+            "code": {
+                "coding": [{
+                    "code": instance.test_code,
+                    "display": instance.test_display,
+                }],
+                "text": instance.test_display,
+            },
+            "subject": {
+                "reference": f"Patient/{instance.patient.id}",
+                "display": instance.patient.full_name,
+            },
+            "conclusion": instance.conclusion,
+        }
+
+        if instance.effective_datetime:
+            payload["effectiveDateTime"] = instance.effective_datetime.isoformat()
+        if instance.issued_at:
+            payload["issued"] = instance.issued_at.isoformat()
+        if instance.result_value:
+            payload["conclusionCode"] = [{"text": instance.result_value}]
+        if instance.performer_id or instance.performer_display:
+            payload["performer"] = [{
+                "reference": f"Practitioner/{instance.performer_id}" if instance.performer_id else None,
+                "display": instance.performer_display,
+            }]
+
+        return payload
+
+
+class AppointmentSerializer(serializers.ModelSerializer):
+    resourceType = serializers.CharField(required=False, write_only=True)
+    appointmentType = serializers.DictField(required=False, write_only=True)
+    participant = serializers.ListField(
+        child=serializers.DictField(), write_only=True
+    )
+    start = serializers.DateTimeField(write_only=True)
+    end = serializers.DateTimeField(required=False, allow_null=True, write_only=True)
+
+    class Meta:
+        from .models import Appointment
+        model = Appointment
+        fields = [
+            'id', 'resourceType', 'status', 'appointmentType',
+            'description', 'comment', 'start', 'end', 'participant',
+        ]
+        extra_kwargs = {'id': {'read_only': True}}
+
+    def _request_patient(self):
+        request = self.context.get('request')
+        if request and request.user.is_authenticated and hasattr(request.user, 'patient_profile'):
+            return request.user.patient_profile
+        return None
+
+    def _extract_patient_from_participants(self, participants, fallback_patient=None):
+        if not participants:
+            if fallback_patient is not None:
+                return fallback_patient
+            raise serializers.ValidationError({'participant': 'At least one participant is required.'})
+
+        from .models import Patient
+        for participant in participants:
+            actor = participant.get('actor', {})
+            reference = actor.get('reference')
+            if isinstance(reference, str) and reference.startswith('Patient/'):
+                patient_id = reference.split('/')[-1]
+                return Patient.objects.get(id=patient_id)
+
+        if fallback_patient is not None:
+            return fallback_patient
+
+        raise serializers.ValidationError({
+            'participant': 'A Patient participant is required (Patient/<id>).'
+        })
+
+    def _extract_secondary_participants(self, participants):
+        practitioner_id = None
+        practitioner_display = None
+        location_id = None
+        location_display = None
+
+        for participant in participants:
+            actor = participant.get('actor', {})
+            reference = actor.get('reference', '')
+            display = actor.get('display')
+
+            if isinstance(reference, str) and reference.startswith('Practitioner/') and not practitioner_id:
+                practitioner_id = reference.split('/')[-1]
+                practitioner_display = display or reference
+
+            if isinstance(reference, str) and reference.startswith('Location/') and not location_id:
+                location_id = reference.split('/')[-1]
+                location_display = display or reference
+
+        return practitioner_id, practitioner_display, location_id, location_display
+
+    def validate(self, attrs):
+        resource_type = attrs.get('resourceType')
+        if resource_type and resource_type != 'Appointment':
+            raise serializers.ValidationError({'resourceType': 'Must be Appointment.'})
+
+        if attrs.get('end') and attrs.get('start') and attrs['end'] <= attrs['start']:
+            raise serializers.ValidationError({'end': 'Appointment end must be after start.'})
+
+        request = self.context.get('request')
+        participants = attrs.get('participant')
+        if request and request.user.is_authenticated and hasattr(request.user, 'patient_profile') and participants:
+            requested_patient = self._extract_patient_from_participants(participants, fallback_patient=None)
+            if requested_patient and requested_patient.id != request.user.patient_profile.id:
+                raise serializers.ValidationError({
+                    'participant': 'You can only create or update appointments for your own patient profile.'
+                })
+
+        return attrs
+
+    def create(self, validated_data):
+        from .models import Appointment
+
+        validated_data.pop('resourceType', None)
+        participants = validated_data.pop('participant', [])
+        patient = self._extract_patient_from_participants(
+            participants,
+            fallback_patient=self._request_patient(),
+        )
+        practitioner_id, practitioner_display, location_id, location_display = \
+            self._extract_secondary_participants(participants)
+
+        appointment_type = validated_data.pop('appointmentType', {})
+        type_code = None
+        type_display = None
+        if appointment_type:
+            type_code, type_display = _extract_code_display_fhir(appointment_type, 'appointmentType')
+
+        return Appointment.objects.create(
+            patient=patient,
+            status=validated_data.get('status', 'booked'),
+            appointment_type_code=type_code,
+            appointment_type_display=type_display,
+            description=validated_data.get('description'),
+            comment=validated_data.get('comment'),
+            start=validated_data['start'],
+            end=validated_data.get('end'),
+            practitioner_id=practitioner_id,
+            practitioner_display=practitioner_display,
+            location_id=location_id,
+            location_display=location_display,
+        )
+
+    def update(self, instance, validated_data):
+        validated_data.pop('resourceType', None)
+
+        if 'status' in validated_data:
+            instance.status = validated_data['status']
+
+        if 'appointmentType' in validated_data:
+            appointment_type = validated_data['appointmentType']
+            instance.appointment_type_code, instance.appointment_type_display = _extract_code_display_fhir(
+                appointment_type, 'appointmentType'
+            )
+
+        if 'description' in validated_data:
+            instance.description = validated_data['description']
+        if 'comment' in validated_data:
+            instance.comment = validated_data['comment']
+        if 'start' in validated_data:
+            instance.start = validated_data['start']
+        if 'end' in validated_data:
+            instance.end = validated_data['end']
+
+        if 'participant' in validated_data:
+            participants = validated_data['participant']
+            instance.patient = self._extract_patient_from_participants(
+                participants,
+                fallback_patient=self._request_patient(),
+            )
+            (
+                instance.practitioner_id,
+                instance.practitioner_display,
+                instance.location_id,
+                instance.location_display,
+            ) = self._extract_secondary_participants(participants)
+
+        if instance.end and instance.end <= instance.start:
+            raise serializers.ValidationError({'end': 'Appointment end must be after start.'})
+
+        instance.save()
+        return instance
+
+    def to_representation(self, instance):
+        participant = [{
+            "actor": {
+                "reference": f"Patient/{instance.patient.id}",
+                "display": instance.patient.full_name,
+            },
+            "status": "accepted",
+        }]
+
+        if instance.practitioner_id or instance.practitioner_display:
+            participant.append({
+                "actor": {
+                    "reference": f"Practitioner/{instance.practitioner_id}" if instance.practitioner_id else None,
+                    "display": instance.practitioner_display,
+                },
+                "status": "accepted",
+            })
+
+        if instance.location_id or instance.location_display:
+            participant.append({
+                "actor": {
+                    "reference": f"Location/{instance.location_id}" if instance.location_id else None,
+                    "display": instance.location_display,
+                },
+                "status": "accepted",
+            })
+
+        payload = {
+            "resourceType": "Appointment",
+            "id": str(instance.id),
+            "status": instance.status,
+            "description": instance.description,
+            "comment": instance.comment,
+            "start": instance.start.isoformat() if instance.start else None,
+            "participant": participant,
+        }
+
+        if instance.end:
+            payload["end"] = instance.end.isoformat()
+
+        if instance.appointment_type_code or instance.appointment_type_display:
+            payload["appointmentType"] = {
+                "coding": [{
+                    "code": instance.appointment_type_code,
+                    "display": instance.appointment_type_display,
+                }],
+                "text": instance.appointment_type_display,
+            }
+
+        return payload
+
+
+class ObservationSerializer(serializers.ModelSerializer):
+    resourceType = serializers.CharField(required=False, write_only=True)
+    subject = serializers.DictField(write_only=True)
+    code = serializers.DictField(write_only=True)
+    category = serializers.ListField(
+        child=serializers.DictField(), required=False, write_only=True
+    )
+    effectiveDateTime = serializers.DateTimeField(
+        required=False, allow_null=True, write_only=True
+    )
+    issued = serializers.DateTimeField(
+        required=False, allow_null=True, write_only=True
+    )
+    valueString = serializers.CharField(
+        required=False, allow_blank=True, write_only=True
+    )
+    valueQuantity = serializers.DictField(required=False, write_only=True)
+    interpretation = serializers.ListField(
+        child=serializers.DictField(), required=False, write_only=True
+    )
+    note = serializers.ListField(
+        child=serializers.DictField(), required=False, write_only=True
+    )
+
+    class Meta:
+        from .models import Observation
+        model = Observation
+        fields = [
+            'id', 'resourceType', 'status', 'subject', 'code', 'category',
+            'effectiveDateTime', 'issued', 'valueString', 'valueQuantity',
+            'interpretation', 'note',
+        ]
+        extra_kwargs = {'id': {'read_only': True}}
+
+    def validate(self, attrs):
+        resource_type = attrs.get('resourceType')
+        if resource_type and resource_type != 'Observation':
+            raise serializers.ValidationError({'resourceType': 'Must be Observation.'})
+
+        if 'valueString' in attrs and 'valueQuantity' in attrs:
+            raise serializers.ValidationError({
+                'valueQuantity': 'Use either valueString or valueQuantity, not both.'
+            })
+
+        value_quantity = attrs.get('valueQuantity')
+        if value_quantity is not None and value_quantity.get('value') in (None, ''):
+            raise serializers.ValidationError({
+                'valueQuantity': 'valueQuantity.value is required when valueQuantity is provided.'
+            })
+
+        return attrs
+
+    def create(self, validated_data):
+        from .models import Observation, Patient
+
+        validated_data.pop('resourceType', None)
+        subject_ref = validated_data.pop('subject', {}).get('reference', '')
+        patient_id = subject_ref.split('/')[-1]
+        patient = Patient.objects.get(id=patient_id)
+
+        observation_code, observation_display = _extract_code_display_fhir(
+            validated_data.pop('code'),
+            'code',
+        )
+
+        category_code = None
+        category_display = None
+        category_data = validated_data.pop('category', [])
+        if category_data:
+            category_code, category_display = _extract_code_display_fhir(
+                category_data[0],
+                'category[0]',
+            )
+
+        interpretation_code = None
+        interpretation_display = None
+        interpretation_data = validated_data.pop('interpretation', [])
+        if interpretation_data:
+            interpretation_code, interpretation_display = _extract_code_display_fhir(
+                interpretation_data[0],
+                'interpretation[0]',
+            )
+
+        value_quantity_value = None
+        value_quantity_unit = None
+        value_quantity_system = None
+        value_quantity_code = None
+        if 'valueQuantity' in validated_data:
+            quantity = validated_data.pop('valueQuantity')
+            value_quantity_value = quantity.get('value')
+            value_quantity_unit = quantity.get('unit')
+            value_quantity_system = quantity.get('system')
+            value_quantity_code = quantity.get('code')
+
+        notes = validated_data.pop('note', [])
+
+        return Observation.objects.create(
+            patient=patient,
+            status=validated_data.get('status', 'final'),
+            category_code=category_code,
+            category_display=category_display,
+            observation_code=observation_code,
+            observation_display=observation_display,
+            effective_datetime=validated_data.get('effectiveDateTime'),
+            issued_at=validated_data.get('issued'),
+            value_string=validated_data.get('valueString'),
+            value_quantity_value=value_quantity_value,
+            value_quantity_unit=value_quantity_unit,
+            value_quantity_system=value_quantity_system,
+            value_quantity_code=value_quantity_code,
+            interpretation_code=interpretation_code,
+            interpretation_display=interpretation_display,
+            note=(notes[0].get('text') if notes else None),
+        )
+
+    def update(self, instance, validated_data):
+        validated_data.pop('resourceType', None)
+
+        if 'status' in validated_data:
+            instance.status = validated_data['status']
+
+        if 'subject' in validated_data:
+            from .models import Patient
+            subject_ref = validated_data['subject'].get('reference', '')
+            patient_id = subject_ref.split('/')[-1]
+            instance.patient = Patient.objects.get(id=patient_id)
+
+        if 'code' in validated_data:
+            instance.observation_code, instance.observation_display = _extract_code_display_fhir(
+                validated_data['code'],
+                'code',
+            )
+
+        if 'category' in validated_data:
+            category_data = validated_data['category']
+            if category_data:
+                instance.category_code, instance.category_display = _extract_code_display_fhir(
+                    category_data[0],
+                    'category[0]',
+                )
+            else:
+                instance.category_code = None
+                instance.category_display = None
+
+        if 'effectiveDateTime' in validated_data:
+            instance.effective_datetime = validated_data['effectiveDateTime']
+        if 'issued' in validated_data:
+            instance.issued_at = validated_data['issued']
+
+        if 'valueString' in validated_data:
+            instance.value_string = validated_data['valueString']
+            instance.value_quantity_value = None
+            instance.value_quantity_unit = None
+            instance.value_quantity_system = None
+            instance.value_quantity_code = None
+
+        if 'valueQuantity' in validated_data:
+            quantity = validated_data['valueQuantity']
+            instance.value_quantity_value = quantity.get('value')
+            instance.value_quantity_unit = quantity.get('unit')
+            instance.value_quantity_system = quantity.get('system')
+            instance.value_quantity_code = quantity.get('code')
+            instance.value_string = None
+
+        if 'interpretation' in validated_data:
+            interpretation_data = validated_data['interpretation']
+            if interpretation_data:
+                (
+                    instance.interpretation_code,
+                    instance.interpretation_display,
+                ) = _extract_code_display_fhir(
+                    interpretation_data[0],
+                    'interpretation[0]',
+                )
+            else:
+                instance.interpretation_code = None
+                instance.interpretation_display = None
+
+        if 'note' in validated_data:
+            notes = validated_data['note']
+            instance.note = notes[0].get('text') if notes else None
+
+        instance.save()
+        return instance
+
+    def to_representation(self, instance):
+        payload = {
+            "resourceType": "Observation",
+            "id": str(instance.id),
+            "status": instance.status,
+            "subject": {
+                "reference": f"Patient/{instance.patient.id}",
+                "display": instance.patient.full_name,
+            },
+            "code": {
+                "coding": [{
+                    "code": instance.observation_code,
+                    "display": instance.observation_display,
+                }],
+                "text": instance.observation_display,
+            },
+        }
+
+        if instance.category_code or instance.category_display:
+            payload["category"] = [{
+                "coding": [{
+                    "code": instance.category_code,
+                    "display": instance.category_display,
+                }],
+                "text": instance.category_display,
+            }]
+
+        if instance.effective_datetime:
+            payload["effectiveDateTime"] = instance.effective_datetime.isoformat()
+        if instance.issued_at:
+            payload["issued"] = instance.issued_at.isoformat()
+
+        if instance.value_quantity_value is not None:
+            payload["valueQuantity"] = {
+                "value": float(instance.value_quantity_value),
+                "unit": instance.value_quantity_unit,
+                "system": instance.value_quantity_system,
+                "code": instance.value_quantity_code,
+            }
+        elif instance.value_string:
+            payload["valueString"] = instance.value_string
+
+        if instance.interpretation_code or instance.interpretation_display:
+            payload["interpretation"] = [{
+                "coding": [{
+                    "code": instance.interpretation_code,
+                    "display": instance.interpretation_display,
+                }],
+                "text": instance.interpretation_display,
+            }]
+
+        if instance.note:
+            payload["note"] = [{"text": instance.note}]
+
+        return payload

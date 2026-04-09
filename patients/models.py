@@ -656,3 +656,174 @@ class MedicationDispense(models.Model):
             f"{self.dosage_morning}/{self.dosage_afternoon}/{self.dosage_evening} "
             f"({self.get_meal_timing_display()})"
         )
+
+
+class Vaccination(models.Model):
+    """
+    FHIR R4: Immunization
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    patient = models.ForeignKey(
+        Patient, on_delete=models.PROTECT,
+        related_name='vaccinations', db_index=True
+    )
+
+    status = models.CharField(max_length=32, default='completed', db_index=True)
+    vaccine_code = models.CharField(max_length=100, db_index=True)
+    vaccine_display = models.CharField(max_length=255)
+    occurrence_date = models.DateTimeField(default=timezone.now, db_index=True)
+
+    performer_id = models.UUIDField(null=True, blank=True, db_index=True)
+    performer_display = models.CharField(max_length=255, null=True, blank=True)
+    lot_number = models.CharField(max_length=80, null=True, blank=True)
+    note = models.TextField(null=True, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'vaccinations'
+        ordering = ['-occurrence_date', '-created_at']
+        verbose_name = 'Vaccination'
+        verbose_name_plural = 'Vaccinations'
+        indexes = [
+            models.Index(fields=['patient', 'occurrence_date']),
+            models.Index(fields=['status']),
+            models.Index(fields=['vaccine_code']),
+        ]
+
+    def __str__(self):
+        return f"{self.patient.patient_id} - {self.vaccine_display}"
+
+
+class DiagnosticTest(models.Model):
+    """
+    FHIR R4: DiagnosticReport (lightweight test/result record)
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    patient = models.ForeignKey(
+        Patient, on_delete=models.PROTECT,
+        related_name='diagnostic_tests', db_index=True
+    )
+
+    status = models.CharField(max_length=32, default='final', db_index=True)
+    test_code = models.CharField(max_length=100, db_index=True)
+    test_display = models.CharField(max_length=255)
+    effective_datetime = models.DateTimeField(default=timezone.now, db_index=True)
+    issued_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    conclusion = models.TextField(null=True, blank=True)
+    result_value = models.CharField(max_length=255, null=True, blank=True)
+
+    performer_id = models.UUIDField(null=True, blank=True, db_index=True)
+    performer_display = models.CharField(max_length=255, null=True, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'diagnostic_tests'
+        ordering = ['-effective_datetime', '-created_at']
+        verbose_name = 'Diagnostic Test'
+        verbose_name_plural = 'Diagnostic Tests'
+        indexes = [
+            models.Index(fields=['patient', 'effective_datetime']),
+            models.Index(fields=['status']),
+            models.Index(fields=['test_code']),
+        ]
+
+    def __str__(self):
+        return f"{self.patient.patient_id} - {self.test_display}"
+
+
+class Appointment(models.Model):
+    """
+    FHIR R4: Appointment
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    patient = models.ForeignKey(
+        Patient, on_delete=models.PROTECT,
+        related_name='appointments', db_index=True
+    )
+
+    status = models.CharField(max_length=32, default='booked', db_index=True)
+    appointment_type_code = models.CharField(max_length=100, null=True, blank=True, db_index=True)
+    appointment_type_display = models.CharField(max_length=255, null=True, blank=True)
+    start = models.DateTimeField(db_index=True)
+    end = models.DateTimeField(null=True, blank=True)
+    description = models.TextField(null=True, blank=True)
+    comment = models.TextField(null=True, blank=True)
+
+    practitioner_id = models.UUIDField(null=True, blank=True, db_index=True)
+    practitioner_display = models.CharField(max_length=255, null=True, blank=True)
+    location_id = models.UUIDField(null=True, blank=True, db_index=True)
+    location_display = models.CharField(max_length=255, null=True, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'appointments'
+        ordering = ['-start', '-created_at']
+        verbose_name = 'Appointment'
+        verbose_name_plural = 'Appointments'
+        indexes = [
+            models.Index(fields=['patient', 'start']),
+            models.Index(fields=['status']),
+            models.Index(fields=['appointment_type_code']),
+        ]
+
+    def __str__(self):
+        label = self.appointment_type_display or 'Appointment'
+        return f"{self.patient.patient_id} - {label}"
+
+
+class Observation(models.Model):
+    """
+    FHIR R4: Observation (standalone)
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    patient = models.ForeignKey(
+        Patient, on_delete=models.PROTECT,
+        related_name='observations', db_index=True
+    )
+
+    status = models.CharField(max_length=32, default='final', db_index=True)
+    category_code = models.CharField(max_length=64, null=True, blank=True)
+    category_display = models.CharField(max_length=100, null=True, blank=True)
+    observation_code = models.CharField(max_length=100, db_index=True)
+    observation_display = models.CharField(max_length=255)
+    effective_datetime = models.DateTimeField(null=True, blank=True, db_index=True)
+    issued_at = models.DateTimeField(null=True, blank=True, db_index=True)
+
+    value_string = models.TextField(null=True, blank=True)
+    value_quantity_value = models.DecimalField(
+        max_digits=14, decimal_places=4, null=True, blank=True
+    )
+    value_quantity_unit = models.CharField(max_length=50, null=True, blank=True)
+    value_quantity_system = models.CharField(max_length=255, null=True, blank=True)
+    value_quantity_code = models.CharField(max_length=64, null=True, blank=True)
+
+    interpretation_code = models.CharField(max_length=64, null=True, blank=True)
+    interpretation_display = models.CharField(max_length=100, null=True, blank=True)
+    note = models.TextField(null=True, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'observations'
+        ordering = ['-effective_datetime', '-created_at']
+        verbose_name = 'Observation'
+        verbose_name_plural = 'Observations'
+        indexes = [
+            models.Index(fields=['patient', 'effective_datetime']),
+            models.Index(fields=['status']),
+            models.Index(fields=['observation_code']),
+        ]
+
+    def __str__(self):
+        return f"{self.patient.patient_id} - {self.observation_display}"

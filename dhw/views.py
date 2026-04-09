@@ -18,12 +18,15 @@ from patients.models import (
     Encounter, ServiceRequest,
     DiagnosticReport, DiagnosticObservation,
     MedicationRequest, MedicationDispense,
+    Vaccination, DiagnosticTest, Appointment, Observation,
 )
 from patients.serializers import (
     PatientSerializer,
     EncounterSerializer, ServiceRequestSerializer,
     DiagnosticReportSerializer, DiagnosticObservationSerializer,
     MedicationRequestSerializer, MedicationDispenseSerializer,
+    VaccinationSerializer, DiagnosticTestSerializer, AppointmentSerializer,
+    ObservationSerializer,
 )
 
 User = get_user_model()
@@ -97,7 +100,7 @@ class PatientViewSet(viewsets.ModelViewSet):
         if self.action in ['update', 'partial_update']:
             return [IsAdminOrClinician()]
         if self.action == 'list':
-            return [IsAdminOrClinician()]
+            return [IsPatientOrClinician()]
         if self.action in ['retrieve', 'summary', 'everything']:
             return [IsPatientOrClinician()]
         return [IsAuthenticated()]
@@ -315,6 +318,71 @@ class PatientAuthViewSet(viewsets.ViewSet):
         }, status=status.HTTP_201_CREATED)
 
 
+class ClinicalRecordAccessMixin:
+    def get_queryset(self):
+        user = self.request.user
+
+        if hasattr(user, 'patient_profile'):
+            return self.queryset.filter(patient_id=user.patient_profile.id)
+
+        return self.queryset.filter(patient__active=True)
+
+    def get_permissions(self):
+        if self.action in ['create', 'update', 'partial_update', 'destroy']:
+            return [IsAdminOrClinician()]
+        if self.action in ['list', 'retrieve']:
+            return [IsPatientOrClinician()]
+        return [IsAuthenticated()]
+
+    def list(self, request, *args, **kwargs):
+        queryset = self.get_queryset()
+        serializer = self.get_serializer(queryset, many=True)
+        return Response({
+            "resourceType": "Bundle",
+            "type": "searchset",
+            "total": queryset.count(),
+            "entry": [{"resource": r} for r in serializer.data],
+        })
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        obj = serializer.save()
+        return Response(
+            serializer.to_representation(obj),
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class VaccinationViewSet(ClinicalRecordAccessMixin, viewsets.ModelViewSet):
+    queryset = Vaccination.objects.select_related('patient')
+    serializer_class = VaccinationSerializer
+    lookup_field = 'id'
+
+
+class DiagnosticTestViewSet(ClinicalRecordAccessMixin, viewsets.ModelViewSet):
+    queryset = DiagnosticTest.objects.select_related('patient')
+    serializer_class = DiagnosticTestSerializer
+    lookup_field = 'id'
+
+
+class AppointmentViewSet(ClinicalRecordAccessMixin, viewsets.ModelViewSet):
+    queryset = Appointment.objects.select_related('patient')
+    serializer_class = AppointmentSerializer
+    lookup_field = 'id'
+
+    def get_permissions(self):
+        if self.action == 'create':
+            return [IsPatientOrClinician()]
+        return super().get_permissions()
+
+
+class ObservationViewSet(ClinicalRecordAccessMixin, viewsets.ModelViewSet):
+    queryset = Observation.objects.select_related('patient')
+    serializer_class = ObservationSerializer
+    lookup_field = 'id'
+
+
 # =============================================================================
 # Encounter ViewSet  (FHIR: Encounter)
 # =============================================================================
@@ -360,7 +428,7 @@ class EncounterViewSet(viewsets.ModelViewSet):
         return qs.order_by('-visit_date')
 
     def get_permissions(self):
-        if self.action in ('list', 'retrieve', 'service_requests', 'medication_requests'):
+        if self.action in ('list', 'retrieve', 'service_requests', 'medication_requests', 'create'):
             return [IsPatientOrClinician()]
         if self.action == 'destroy':
             return [IsAdmin()]
@@ -468,6 +536,8 @@ class ServiceRequestViewSet(viewsets.ModelViewSet):
         return qs.order_by('-request_date')
 
     def get_permissions(self):
+        if self.action in ('list', 'retrieve', 'diagnostic_report', 'create'):
+            return [IsPatientOrClinician()]
         if self.action == 'destroy':
             return [IsAdmin()]
         return [IsAdminOrClinician()]
@@ -587,6 +657,8 @@ class DiagnosticReportViewSet(viewsets.ModelViewSet):
         return qs.order_by('-issued')
 
     def get_permissions(self):
+        if self.action in ('list', 'retrieve', 'observations', 'create'):
+            return [IsPatientOrClinician()]
         if self.action == 'destroy':
             return [IsAdmin()]
         return [IsAdminOrClinician()]
@@ -694,6 +766,8 @@ class MedicationRequestViewSet(viewsets.ModelViewSet):
         return qs.order_by('-prescription_date')
 
     def get_permissions(self):
+        if self.action in ('list', 'retrieve', 'dispenses', 'create'):
+            return [IsPatientOrClinician()]
         if self.action == 'destroy':
             return [IsAdmin()]
         return [IsAdminOrClinician()]
@@ -798,4 +872,4 @@ class MedicationRequestViewSet(viewsets.ModelViewSet):
         return Response(
             serializer.to_representation(dispense),
             status=status.HTTP_200_OK,
-        )
+        )
