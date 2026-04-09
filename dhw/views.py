@@ -11,9 +11,20 @@ import jwt
 
 from .permissions import IsAdmin, IsClinician, IsAdminOrClinician, IsPatientOrClinician, IsPatientOwner
 from django.conf import settings
-from patients.models import Patient, PatientOTP
-from patients.serializers import PatientSerializer
-from .permissions import IsAdmin, IsClinician, IsPatientOwner
+
+# Patient app models & serializers
+from patients.models import (
+    Patient, PatientOTP,
+    Encounter, ServiceRequest,
+    DiagnosticReport, DiagnosticObservation,
+    MedicationRequest, MedicationDispense,
+)
+from patients.serializers import (
+    PatientSerializer,
+    EncounterSerializer, ServiceRequestSerializer,
+    DiagnosticReportSerializer, DiagnosticObservationSerializer,
+    MedicationRequestSerializer, MedicationDispenseSerializer,
+)
 
 User = get_user_model()
 
@@ -302,3 +313,489 @@ class PatientAuthViewSet(viewsets.ViewSet):
                 "username": username,
             }
         }, status=status.HTTP_201_CREATED)
+
+
+# =============================================================================
+# Encounter ViewSet  (FHIR: Encounter)
+# =============================================================================
+
+class EncounterViewSet(viewsets.ModelViewSet):
+    """
+    FHIR R4 Encounter resource.
+
+    list      GET  /api/encounters/                      Clinician / Admin
+    create    POST /api/encounters/                      Clinician / Admin
+    retrieve  GET  /api/encounters/{id}/                 Clinician / Admin / Patient (own)
+    update    PUT  /api/encounters/{id}/                 Clinician / Admin
+    destroy   DELETE /api/encounters/{id}/               Admin only (soft-delete → cancelled)
+
+    Nested:
+      GET  /api/encounters/{id}/service-requests/        Lab requests for this encounter
+      GET  /api/encounters/{id}/medication-requests/     Prescriptions for this encounter
+
+    Query filters:
+      ?patient=<uuid>     filter by patient UUID
+      ?clinician=<uuid>   filter by clinician UUID
+      ?status=<status>    filter by encounter status
+    """
+
+    serializer_class = EncounterSerializer
+    lookup_field = 'id'
+
+    def get_queryset(self):
+        qs = Encounter.objects.select_related('patient').filter(patient__active=True)
+
+        patient_id = self.request.query_params.get('patient')
+        if patient_id:
+            qs = qs.filter(patient__id=patient_id)
+
+        clinician_id = self.request.query_params.get('clinician')
+        if clinician_id:
+            qs = qs.filter(clinician_id=clinician_id)
+
+        enc_status = self.request.query_params.get('status')
+        if enc_status:
+            qs = qs.filter(status=enc_status)
+
+        return qs.order_by('-visit_date')
+
+    def get_permissions(self):
+        if self.action in ('list', 'retrieve', 'service_requests', 'medication_requests'):
+            return [IsPatientOrClinician()]
+        if self.action == 'destroy':
+            return [IsAdmin()]
+        return [IsAdminOrClinician()]
+
+    def list(self, request, *args, **kwargs):
+        queryset = self.get_queryset()
+        serializer = self.get_serializer(queryset, many=True)
+        return Response({
+            "resourceType": "Bundle",
+            "type": "searchset",
+            "total": queryset.count(),
+            "entry": [{"resource": r} for r in serializer.data],
+        })
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        encounter = serializer.save()
+        return Response(
+            serializer.to_representation(encounter),
+            status=status.HTTP_201_CREATED,
+        )
+
+    def destroy(self, request, *args, **kwargs):
+        encounter = self.get_object()
+        encounter.status = 'cancelled'
+        encounter.save()
+        return Response({"detail": "Encounter cancelled."}, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['get'], url_path='service-requests')
+    def service_requests(self, request, id=None):
+        encounter = self.get_object()
+        qs = encounter.service_requests.select_related('patient').all()
+        serializer = ServiceRequestSerializer(qs, many=True)
+        return Response({
+            "resourceType": "Bundle",
+            "type": "collection",
+            "total": qs.count(),
+            "entry": [{"resource": r} for r in serializer.data],
+        })
+
+    @action(detail=True, methods=['get'], url_path='medication-requests')
+    def medication_requests(self, request, id=None):
+        encounter = self.get_object()
+        qs = encounter.medication_requests.select_related('patient').prefetch_related('dispenses').all()
+        serializer = MedicationRequestSerializer(qs, many=True)
+        return Response({
+            "resourceType": "Bundle",
+            "type": "collection",
+            "total": qs.count(),
+            "entry": [{"resource": r} for r in serializer.data],
+        })
+
+
+# =============================================================================
+# ServiceRequest ViewSet  (FHIR: ServiceRequest)
+# =============================================================================
+
+class ServiceRequestViewSet(viewsets.ModelViewSet):
+    """
+    FHIR R4 ServiceRequest resource.
+
+    list      GET  /api/service-requests/               Clinician / Admin
+    create    POST /api/service-requests/               Clinician / Admin
+    retrieve  GET  /api/service-requests/{id}/          Clinician / Admin
+    update    PUT  /api/service-requests/{id}/          Clinician / Admin
+    destroy   DELETE /api/service-requests/{id}/        Admin only (soft-delete → revoked)
+
+    Nested:
+      GET  /api/service-requests/{id}/diagnostic-report/         Fetch the filed report
+      POST /api/service-requests/{id}/diagnostic-report/file/    File a new report
+
+    Query filters:
+      ?patient=<uuid>       filter by patient UUID
+      ?encounter=<uuid>     filter by encounter UUID
+      ?status=<status>      filter by status
+      ?category=<category>  filter by category (laboratory|imaging|pathology|other)
+    """
+
+    serializer_class = ServiceRequestSerializer
+    lookup_field = 'id'
+
+    def get_queryset(self):
+        qs = ServiceRequest.objects.select_related('patient', 'encounter').filter(
+            patient__active=True
+        )
+
+        patient_id = self.request.query_params.get('patient')
+        if patient_id:
+            qs = qs.filter(patient__id=patient_id)
+
+        encounter_id = self.request.query_params.get('encounter')
+        if encounter_id:
+            qs = qs.filter(encounter__id=encounter_id)
+
+        req_status = self.request.query_params.get('status')
+        if req_status:
+            qs = qs.filter(status=req_status)
+
+        category = self.request.query_params.get('category')
+        if category:
+            qs = qs.filter(category=category)
+
+        return qs.order_by('-request_date')
+
+    def get_permissions(self):
+        if self.action == 'destroy':
+            return [IsAdmin()]
+        return [IsAdminOrClinician()]
+
+    def list(self, request, *args, **kwargs):
+        queryset = self.get_queryset()
+        serializer = self.get_serializer(queryset, many=True)
+        return Response({
+            "resourceType": "Bundle",
+            "type": "searchset",
+            "total": queryset.count(),
+            "entry": [{"resource": r} for r in serializer.data],
+        })
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        service_request = serializer.save()
+        return Response(
+            serializer.to_representation(service_request),
+            status=status.HTTP_201_CREATED,
+        )
+
+    def destroy(self, request, *args, **kwargs):
+        service_request = self.get_object()
+        service_request.status = 'revoked'
+        service_request.save()
+        return Response({"detail": "ServiceRequest revoked."}, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['get'], url_path='diagnostic-report')
+    def diagnostic_report(self, request, id=None):
+        """Fetch the DiagnosticReport filed against this ServiceRequest."""
+        service_request = self.get_object()
+        try:
+            report = service_request.diagnostic_report
+        except DiagnosticReport.DoesNotExist:
+            return Response(
+                {"detail": "No diagnostic report filed for this service request yet."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        return Response(DiagnosticReportSerializer(report).to_representation(report))
+
+    @action(detail=True, methods=['post'],
+            url_path='diagnostic-report/file', url_name='file-diagnostic-report')
+    def file_diagnostic_report(self, request, id=None):
+        """File a DiagnosticReport against this ServiceRequest (one-shot)."""
+        service_request = self.get_object()
+
+        if hasattr(service_request, 'diagnostic_report'):
+            return Response(
+                {"detail": "A diagnostic report already exists for this service request."},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        data = request.data.copy()
+        data.setdefault('basedOn', [{'reference': f'ServiceRequest/{service_request.id}'}])
+
+        serializer = DiagnosticReportSerializer(data=data)
+        serializer.is_valid(raise_exception=True)
+        report = serializer.save()
+
+        service_request.status = 'completed'
+        service_request.save()
+
+        return Response(
+            serializer.to_representation(report),
+            status=status.HTTP_201_CREATED,
+        )
+
+
+# =============================================================================
+# DiagnosticReport ViewSet  (FHIR: DiagnosticReport)
+# =============================================================================
+
+class DiagnosticReportViewSet(viewsets.ModelViewSet):
+    """
+    FHIR R4 DiagnosticReport resource.
+
+    list      GET  /api/diagnostic-reports/              Clinician / Admin
+    create    POST /api/diagnostic-reports/              Clinician / Admin
+    retrieve  GET  /api/diagnostic-reports/{id}/         Clinician / Admin
+    update    PUT  /api/diagnostic-reports/{id}/         Clinician / Admin
+    destroy   DELETE /api/diagnostic-reports/{id}/       Admin only (soft-delete → cancelled)
+
+    Nested:
+      GET  /api/diagnostic-reports/{id}/observations/          All observations
+      POST /api/diagnostic-reports/{id}/observations/add/      Append one observation
+
+    Query filters:
+      ?patient=<uuid>           filter by patient UUID
+      ?interpretation=<value>   normal|abnormal|critical|pending
+      ?status=<status>          registered|partial|final|amended|cancelled
+    """
+
+    serializer_class = DiagnosticReportSerializer
+    lookup_field = 'id'
+
+    def get_queryset(self):
+        qs = DiagnosticReport.objects.select_related(
+            'service_request__patient'
+        ).prefetch_related('observations').filter(
+            service_request__patient__active=True
+        )
+
+        patient_id = self.request.query_params.get('patient')
+        if patient_id:
+            qs = qs.filter(service_request__patient__id=patient_id)
+
+        interp = self.request.query_params.get('interpretation')
+        if interp:
+            qs = qs.filter(interpretation=interp)
+
+        rpt_status = self.request.query_params.get('status')
+        if rpt_status:
+            qs = qs.filter(status=rpt_status)
+
+        return qs.order_by('-issued')
+
+    def get_permissions(self):
+        if self.action == 'destroy':
+            return [IsAdmin()]
+        return [IsAdminOrClinician()]
+
+    def list(self, request, *args, **kwargs):
+        queryset = self.get_queryset()
+        serializer = self.get_serializer(queryset, many=True)
+        return Response({
+            "resourceType": "Bundle",
+            "type": "searchset",
+            "total": queryset.count(),
+            "entry": [{"resource": r} for r in serializer.data],
+        })
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        report = serializer.save()
+        return Response(
+            serializer.to_representation(report),
+            status=status.HTTP_201_CREATED,
+        )
+
+    def destroy(self, request, *args, **kwargs):
+        report = self.get_object()
+        report.status = 'cancelled'
+        report.save()
+        return Response({"detail": "DiagnosticReport cancelled."}, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['get'], url_path='observations')
+    def observations(self, request, id=None):
+        """List all Observation records for this DiagnosticReport."""
+        report = self.get_object()
+        qs = report.observations.all()
+        serializer = DiagnosticObservationSerializer(qs, many=True)
+        return Response({
+            "resourceType": "Bundle",
+            "type": "collection",
+            "total": qs.count(),
+            "entry": [{"resource": r} for r in serializer.data],
+        })
+
+    @action(detail=True, methods=['post'],
+            url_path='observations/add', url_name='add-observation')
+    def add_observation(self, request, id=None):
+        """Append a single Observation to an existing DiagnosticReport."""
+        report = self.get_object()
+        serializer = DiagnosticObservationSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        observation = DiagnosticObservation.objects.create(
+            report=report,
+            **serializer.validated_data,
+        )
+        return Response(
+            serializer.to_representation(observation),
+            status=status.HTTP_201_CREATED,
+        )
+
+
+# =============================================================================
+# MedicationRequest ViewSet  (FHIR: MedicationRequest)
+# =============================================================================
+
+class MedicationRequestViewSet(viewsets.ModelViewSet):
+    """
+    FHIR R4 MedicationRequest resource.
+
+    list      GET  /api/medication-requests/                     Clinician / Admin
+    create    POST /api/medication-requests/                     Clinician / Admin
+    retrieve  GET  /api/medication-requests/{id}/                Clinician / Admin
+    update    PUT  /api/medication-requests/{id}/                Clinician / Admin
+    destroy   DELETE /api/medication-requests/{id}/              Admin only (soft-delete → cancelled)
+
+    Nested:
+      GET  /api/medication-requests/{id}/dispenses/                  All dispenses
+      POST /api/medication-requests/{id}/dispenses/add/              Add a dispense line
+      POST /api/medication-requests/{id}/dispenses/{did}/dispense/   Mark a line as dispensed
+
+    Query filters:
+      ?patient=<uuid>      filter by patient UUID
+      ?encounter=<uuid>    filter by encounter UUID
+      ?status=<status>     active|completed|cancelled|on-hold
+    """
+
+    serializer_class = MedicationRequestSerializer
+    lookup_field = 'id'
+
+    def get_queryset(self):
+        qs = MedicationRequest.objects.select_related(
+            'patient', 'encounter'
+        ).prefetch_related('dispenses').filter(patient__active=True)
+
+        patient_id = self.request.query_params.get('patient')
+        if patient_id:
+            qs = qs.filter(patient__id=patient_id)
+
+        encounter_id = self.request.query_params.get('encounter')
+        if encounter_id:
+            qs = qs.filter(encounter__id=encounter_id)
+
+        req_status = self.request.query_params.get('status')
+        if req_status:
+            qs = qs.filter(status=req_status)
+
+        return qs.order_by('-prescription_date')
+
+    def get_permissions(self):
+        if self.action == 'destroy':
+            return [IsAdmin()]
+        return [IsAdminOrClinician()]
+
+    def list(self, request, *args, **kwargs):
+        queryset = self.get_queryset()
+        serializer = self.get_serializer(queryset, many=True)
+        return Response({
+            "resourceType": "Bundle",
+            "type": "searchset",
+            "total": queryset.count(),
+            "entry": [{"resource": r} for r in serializer.data],
+        })
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        med_request = serializer.save()
+        return Response(
+            serializer.to_representation(med_request),
+            status=status.HTTP_201_CREATED,
+        )
+
+    def destroy(self, request, *args, **kwargs):
+        med_request = self.get_object()
+        med_request.status = 'cancelled'
+        med_request.save()
+        return Response({"detail": "MedicationRequest cancelled."}, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['get'], url_path='dispenses')
+    def dispenses(self, request, id=None):
+        """List all MedicationDispense records for this MedicationRequest."""
+        med_request = self.get_object()
+        qs = med_request.dispenses.all()
+        serializer = MedicationDispenseSerializer(qs, many=True)
+        return Response({
+            "resourceType": "Bundle",
+            "type": "collection",
+            "total": qs.count(),
+            "entry": [{"resource": r} for r in serializer.data],
+        })
+
+    @action(detail=True, methods=['post'],
+            url_path='dispenses/add', url_name='add-dispense')
+    def add_dispense(self, request, id=None):
+        """Add a MedicationDispense line to an existing MedicationRequest."""
+        med_request = self.get_object()
+        serializer = MedicationDispenseSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        dispense = MedicationDispense.objects.create(
+            medication_request=med_request,
+            **serializer.validated_data,
+        )
+        return Response(
+            serializer.to_representation(dispense),
+            status=status.HTTP_201_CREATED,
+        )
+
+    @action(
+        detail=True, methods=['post'],
+        url_path=r'dispenses/(?P<did>[^/.]+)/dispense',
+        url_name='mark-dispensed',
+    )
+    def mark_dispensed(self, request, id=None, did=None):
+        """
+        Mark a specific dispense line as completed by a pharmacist.
+
+        Body:
+          {
+            "performer": [{"actor": {"reference": "Practitioner/uuid", "display": "Pharm. Mwale"}}],
+            "whenHandedOver": "2026-04-09T10:00:00Z"   // optional — defaults to now
+          }
+        """
+        med_request = self.get_object()
+
+        try:
+            dispense = med_request.dispenses.get(id=did)
+        except MedicationDispense.DoesNotExist:
+            return Response(
+                {"detail": "Dispense record not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        if dispense.status == 'completed':
+            return Response(
+                {"detail": "This medication has already been dispensed."},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        performers = request.data.get('performer', [])
+        if performers:
+            actor = performers[0].get('actor', {})
+            ref = actor.get('reference', '').split('/')[-1]
+            dispense.dispensed_by_id = ref or None
+            dispense.dispensed_by_display = actor.get('display', '')
+
+        dispense.dispensed_date = request.data.get('whenHandedOver') or timezone.now()
+        dispense.status = 'completed'
+        dispense.save()
+
+        serializer = MedicationDispenseSerializer(dispense)
+        return Response(
+            serializer.to_representation(dispense),
+            status=status.HTTP_200_OK,
+        )
