@@ -73,6 +73,7 @@ class PatientSerializer(serializers.ModelSerializer):
         return {
             "resourceType": "Patient",
             "id": str(instance.id),
+            "patient_id": instance.patient_id,   # human-readable: DIG-1001 or national_id
             "active": instance.active,
             "identifier": self._build_identifiers(instance),
             "name": self._build_name(instance),
