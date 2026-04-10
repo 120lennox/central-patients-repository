@@ -72,6 +72,7 @@ class PatientSerializer(serializers.ModelSerializer):
         return {
             "resourceType": "Patient",
             "id": str(instance.id),
+            "patient_id": instance.patient_id,   # human-readable: DIG-1001 or national_id
             "active": instance.active,
             "identifier": self._build_identifiers(instance),
             "name": self._build_name(instance),
@@ -140,7 +141,7 @@ class PatientSerializer(serializers.ModelSerializer):
         if address_data:
             addr = address_data[0]
             validated_data['place_of_residence']   = addr.get('text')
-            validated_data['city']               = addr.get('line', [''])[0]
+            # validated_data['city']               = addr.get('line', [''])[0]
             validated_data['traditional_authority'] = addr.get('village')
             validated_data['district_of_origin']    = addr.get('district')
 

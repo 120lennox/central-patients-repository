@@ -66,6 +66,8 @@ INSTALLED_APPS = [
 
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
+        # Must come FIRST — accepts phs-hms practitioner JWTs without a CPR user account
+        'dhw.hms_authentication.HMSJWTAuthentication',
         'rest_framework.authentication.SessionAuthentication',
         'rest_framework_simplejwt.authentication.JWTAuthentication',
     ],
@@ -81,6 +83,14 @@ SPECTACULAR_SETTINGS = {
 
 AUTH_USER_MODEL = 'accounts.User'
 
+# ── Cross-service JWT (HMS → CPR) ─────────────────────────────────────────────
+# Must match phs-hms SECRET_KEY so CPR can verify HMS-issued practitioner tokens.
+# In production, set this via environment variable.
+HMS_SECRET_KEY = os.environ.get(
+    'HMS_SECRET_KEY',
+    'django-insecure-fi330(&u&vx9y%*lvfl79&978ei2g48%1*2fusz72d^p0()i*z',  # phs-hms dev key
+)
+
 ACCOUNT_AUTHENTICATION_METHOD = 'username_email'
 ACCOUNT_EMAIL_REQUIRED = False        # email is optional
 ACCOUNT_EMAIL_VERIFICATION = 'none'  # no email verification, OTP handles this
@@ -89,6 +99,7 @@ ACCOUNT_USER_MODEL_USERNAME_FIELD = 'username'
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    'corsheaders.middleware.CorsMiddleware',           # must be before CommonMiddleware
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -96,6 +107,20 @@ MIDDLEWARE = [
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
     'allauth.account.middleware.AccountMiddleware',
+]
+
+# ── CORS ─────────────────────────────────────────────────────────────────────
+CORS_ALLOWED_ORIGINS = [
+    'http://localhost:3000',
+    'http://127.0.0.1:3000',
+]
+CORS_ALLOW_CREDENTIALS = True
+# Allow auth headers
+CORS_ALLOW_HEADERS = [
+    'accept',
+    'authorization',
+    'content-type',
+    'x-csrftoken',
 ]
 
 ROOT_URLCONF = 'cpr.urls'
@@ -186,5 +211,5 @@ STATIC_URL = 'static/'
 
 FHIR_SYSTEM_BASE_URL = os.environ.get(
     'FHIR_SYSTEM_BASE_URL',
-    'http://127.0.0.1:8000'  # default to dev
+    'http://127.0.0.1:8001'  # CPR dev server
 )
