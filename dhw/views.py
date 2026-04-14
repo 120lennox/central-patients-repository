@@ -101,7 +101,48 @@ class PatientViewSet(viewsets.ModelViewSet):
         if self.action in ['retrieve', 'summary', 'everything']:
             return [IsPatientOrClinician()]
         return [IsAuthenticated()]
-    
+
+    def get_object(self):
+        """
+        Allow lookup by UUID or by any of the human-readable patient identifiers
+        (patient_id, digital_id, national_id).
+        """
+        import uuid as uuid_lib
+        from django.db.models import Q
+        from rest_framework.exceptions import NotFound
+
+        lookup_value = self.kwargs.get(self.lookup_field)
+
+        # Determine if it's a UUID
+        is_uuid = False
+        try:
+            uuid_lib.UUID(str(lookup_value))
+            is_uuid = True
+        except (ValueError, AttributeError):
+            pass
+
+        qs = self.get_queryset()
+        if is_uuid:
+            qs = qs.filter(
+                Q(id=lookup_value) |
+                Q(patient_id=lookup_value) |
+                Q(digital_id=lookup_value) |
+                Q(national_id=lookup_value)
+            )
+        else:
+            qs = qs.filter(
+                Q(patient_id=lookup_value) |
+                Q(digital_id=lookup_value) |
+                Q(national_id=lookup_value)
+            )
+
+        patient = qs.first()
+        if not patient:
+            raise NotFound(f"No patient found with identifier '{lookup_value}'.")
+
+        self.check_object_permissions(self.request, patient)
+        return patient
+
 
     # CREATE — clinician registers a patient
     # POST /patients/
@@ -171,6 +212,81 @@ class PatientViewSet(viewsets.ModelViewSet):
             ]
         }
         return Response(bundle, status=status.HTTP_200_OK)
+
+    # history — patient medical history
+    # GET /patients/{id}/history/
+    # -------------------------------------------------------------------------
+    @action(detail=True, methods=['get'])
+    def history(self, request, id=None):
+        patient = self.get_object()
+        
+        # Prepare recent_visits from encounters
+        recent_visits = []
+        for enc in patient.encounters.order_by('-visit_date'):
+            recent_visits.append({
+                "visit_id": str(enc.id),
+                "patient": str(patient.id),
+                "visit_date": enc.visit_date.isoformat() if enc.visit_date else None,
+                "symptoms": enc.symptoms or enc.diagnosis or "No symptoms recorded",
+                "clinician": enc.clinician_display or "Unknown",
+                "hospital": enc.organization_display or "Unknown",
+                "created_at": enc.created_at.isoformat() if hasattr(enc, 'created_at') else None,
+                "updated_at": enc.updated_at.isoformat() if hasattr(enc, 'updated_at') else None,
+            })
+            
+        # Recent lab tests from ServiceRequests
+        recent_lab_tests = []
+        for sr in patient.service_requests.select_related().order_by('-request_date')[:10]:
+            lab_entry = {
+                "lab_test_id": str(sr.id),
+                "test_type": sr.test_type,
+                "test_date": sr.request_date.isoformat() if sr.request_date else None,
+                "ordered_by": sr.ordered_by_display or "Unknown",
+                "status": sr.status,
+                "result": None,
+            }
+            # Attach result from DiagnosticReport if it exists
+            try:
+                dr = sr.diagnostic_report
+                obs = dr.observations.first()
+                lab_entry["result"] = obs.value_string if obs else dr.conclusion
+                lab_entry["status"] = dr.status
+            except Exception:
+                pass
+            recent_lab_tests.append(lab_entry)
+
+        # Recent prescriptions from MedicationRequests
+        recent_prescriptions = []
+        for mr in patient.medication_requests.prefetch_related('dispenses').order_by('-prescription_date')[:10]:
+            drug_names = ', '.join(
+                d.drug_name for d in mr.dispenses.all()
+            ) or "Unknown Medication"
+            recent_prescriptions.append({
+                "prescription_id": str(mr.id),
+                "drug_name": drug_names,
+                "prescription_date": mr.prescription_date.isoformat() if mr.prescription_date else None,
+                "prescribed_by": mr.prescribed_by_display or "Unknown",
+                "status": mr.status,
+            })
+
+        # Format exactly as the frontend PatientData interface expects
+        data = {
+            "patient_id": patient.patient_id,
+            "digital_id": patient.digital_id,
+            "full_name": patient.full_name,
+            "national_id": patient.national_id,
+            "sex": patient.gender,
+            "date_of_birth": str(patient.date_of_birth) if patient.date_of_birth else "",
+            "age": patient.age if hasattr(patient, 'age') else 0,
+            "phone_number": patient.phone_number if patient.phone_number else "",
+            "place_of_residence": patient.village if patient.village else "",
+            "is_active": patient.active,
+            "recent_visits": recent_visits,
+            "recent_lab_tests": recent_lab_tests,
+            "recent_prescriptions": recent_prescriptions,
+        }
+        
+        return Response(data, status=status.HTTP_200_OK)
 
     # $summary — lightweight patient card
     # GET /patients/{id}/$summary/
@@ -451,7 +567,30 @@ class ServiceRequestViewSet(viewsets.ModelViewSet):
 
         patient_id = self.request.query_params.get('patient')
         if patient_id:
-            qs = qs.filter(patient__id=patient_id)
+            import uuid
+            from django.db.models import Q
+            
+            # Check if it's a valid UUID
+            is_uuid = False
+            try:
+                uuid.UUID(patient_id)
+                is_uuid = True
+            except ValueError:
+                pass
+                
+            if is_uuid:
+                qs = qs.filter(
+                    Q(patient__id=patient_id) | 
+                    Q(patient__patient_id=patient_id) | 
+                    Q(patient__digital_id=patient_id) |
+                    Q(patient__national_id=patient_id)
+                )
+            else:
+                qs = qs.filter(
+                    Q(patient__patient_id=patient_id) | 
+                    Q(patient__digital_id=patient_id) |
+                    Q(patient__national_id=patient_id)
+                )
 
         encounter_id = self.request.query_params.get('encounter')
         if encounter_id:
@@ -464,6 +603,10 @@ class ServiceRequestViewSet(viewsets.ModelViewSet):
         category = self.request.query_params.get('category')
         if category:
             qs = qs.filter(category=category)
+            
+        test_date = self.request.query_params.get('date')
+        if test_date:
+            qs = qs.filter(request_date__date=test_date)
 
         return qs.order_by('-request_date')
 
@@ -604,6 +747,26 @@ class DiagnosticReportViewSet(viewsets.ModelViewSet):
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
+
+        from patients.models import DiagnosticReport, ServiceRequest
+        based_on_data = request.data.get('basedOn', [])
+
+        if based_on_data:
+            sr_uuid = based_on_data[0].get('reference', '').split('/')[-1]
+            try:
+                sr = ServiceRequest.objects.get(id=sr_uuid)
+                existing = DiagnosticReport.objects.filter(service_request=sr).first()
+                if existing:
+                    update_serializer = self.get_serializer(existing, data=request.data, partial=True)
+                    update_serializer.is_valid(raise_exception=True)
+                    report = update_serializer.save()
+                    return Response(
+                        update_serializer.to_representation(report),
+                        status=status.HTTP_200_OK,
+                    )
+            except Exception:
+                pass  # fall through to normal create
+
         report = serializer.save()
         return Response(
             serializer.to_representation(report),
@@ -681,7 +844,29 @@ class MedicationRequestViewSet(viewsets.ModelViewSet):
 
         patient_id = self.request.query_params.get('patient')
         if patient_id:
-            qs = qs.filter(patient__id=patient_id)
+            import uuid
+            from django.db.models import Q
+            
+            is_uuid = False
+            try:
+                uuid.UUID(patient_id)
+                is_uuid = True
+            except ValueError:
+                pass
+                
+            if is_uuid:
+                qs = qs.filter(
+                    Q(patient__id=patient_id) | 
+                    Q(patient__patient_id=patient_id) | 
+                    Q(patient__digital_id=patient_id) |
+                    Q(patient__national_id=patient_id)
+                )
+            else:
+                qs = qs.filter(
+                    Q(patient__patient_id=patient_id) | 
+                    Q(patient__digital_id=patient_id) |
+                    Q(patient__national_id=patient_id)
+                )
 
         encounter_id = self.request.query_params.get('encounter')
         if encounter_id:
@@ -690,6 +875,10 @@ class MedicationRequestViewSet(viewsets.ModelViewSet):
         req_status = self.request.query_params.get('status')
         if req_status:
             qs = qs.filter(status=req_status)
+            
+        prescription_date = self.request.query_params.get('date')
+        if prescription_date:
+            qs = qs.filter(prescription_date__date=prescription_date)
 
         return qs.order_by('-prescription_date')
 

@@ -522,7 +522,7 @@ class EncounterSerializer(serializers.ModelSerializer):
                     "display": instance.clinician_display,
                 }
             }],
-            "period": {"start": instance.visit_date.isoformat() if instance.visit_date else None},
+            "period": {"start": instance.visit_date.isoformat() if hasattr(instance.visit_date, 'isoformat') else instance.visit_date},
             "reasonCode": [{"text": instance.symptoms}] if instance.symptoms else [],
             "diagnosis": [{"condition": {"display": instance.diagnosis}}] if instance.diagnosis else [],
             "note": [{"text": instance.notes}] if instance.notes else [],
